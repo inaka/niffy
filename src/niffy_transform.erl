@@ -19,7 +19,7 @@ parse_transform(Forms, Options) ->
       AppName = app_name(Options, AppDir),
 
       % Parse the Forms and get the C code
-      {CFunctions, Forms2} = funtions_from_forms(Functions, Forms),
+      {CFunctions, Forms2} = functions_from_forms(Functions, Forms),
 
       % Build the C file
       CFileName = filename:join([AppDir, CDir, NIFId ++ ".c"]),
@@ -78,27 +78,27 @@ module([_ | T]) ->
   module(T).
 
 % Get the C code of each of the functions on the niffy config
-funtions_from_forms(Functions, Forms) ->
-  funtions_from_forms(Functions, Forms, [], []).
+functions_from_forms(Functions, Forms) ->
+  functions_from_forms(Functions, Forms, [], []).
 
-funtions_from_forms([], _, Functions, Forms) ->
+functions_from_forms([], _, Functions, Forms) ->
   {Functions, lists:reverse(Forms)};
-funtions_from_forms(_, [], Functions, Forms) ->
+functions_from_forms(_, [], Functions, Forms) ->
   {Functions, lists:reverse(Forms)};
-funtions_from_forms(FunctionNames,
+functions_from_forms(FunctionNames,
                     [{function, L1, F, A,
                       [{clause, _, Args, [], [{string, L2, CCode}]}]} = H | T],
                     Functions, Forms) ->
   case take_function(F, A, FunctionNames) of
     false ->
-      funtions_from_forms(FunctionNames, T, Functions, [H | Forms]);
+      functions_from_forms(FunctionNames, T, Functions, [H | Forms]);
     {{F, A, DirtyMode}, NewFunctionNames} ->
       Stub = get_function_stub(L1, L2, F, A, Args),
       NewFunctions = [{F, A, DirtyMode, CCode} | Functions],
-      funtions_from_forms(NewFunctionNames, T, NewFunctions, [Stub | Forms])
+      functions_from_forms(NewFunctionNames, T, NewFunctions, [Stub | Forms])
   end;
-funtions_from_forms(FunctionNames, [H | T], Functions, Forms) ->
-  funtions_from_forms(FunctionNames, T, Functions, [H | Forms]).
+functions_from_forms(FunctionNames, [H | T], Functions, Forms) ->
+  functions_from_forms(FunctionNames, T, Functions, [H | Forms]).
 
 % Get the function specification from the function list
 take_function(F, A, Functions) ->

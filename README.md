@@ -21,12 +21,16 @@ square(_A) ->
 
 That code compiles and does exactly what you would expect:
 
-```
+```erlang
 > example:square(2).
 4
 ```
 
+### How?
+
 <img src="http://i.imgur.com/YsbKHg1.gif" align="center" style="float:center" height="400" />
+
+### But seriously, how?
 
 Niffy takes care of many things. First, it generates the NIF from the inlined C code, making all the changes so that erlang can include it. For example, given the previous erlang file, niffy will generate (and compile) the following C code:
 
@@ -121,7 +125,7 @@ Just remember that niffy is not parsing your code. And it's just making some rea
 ### How to use niffy?
 Couldn't be simpler: Set it as a dependency of your project and add ``{parse_transform, niffy_transform}`` to ``erl_opts`` in your ``rebar.config`` file. Other options for your ``erl_opts`` file include: The compiler flags that apply to all the files, and the directory where you want to output the generated C code:
 
-```
+```erlang
 {niffy_cdir, "_generated/c_src"}, % This is the default
 {niffy_flags, ["-Werror",
                "-I/usr/lib/erlang/erts-5.8.1/include"]},

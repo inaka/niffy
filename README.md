@@ -116,7 +116,7 @@ static ErlNifFunc niffuncs[] = {{"nat_log", 1, nat_log_nif, ERL_NIF_DIRTY_JOB_CP
 ERL_NIF_INIT(another_example, niffuncs, NULL, NULL, NULL, NULL)
 ```
 
-Just remember that niffy is not parsing your code. And it's just making some reasonable assumptions regarding how it is written. You can see that in the way it handled the C comments, any ``return .*;`` that's not followed by ``enif_make_*`` will be modified for example.
+Just remember that niffy is not parsing your code. And it's just making some reasonable assumptions regarding how it is written. You can see that in the way it handled the C comments, any ``return .*;`` that's not followed by ``enif_make_*`` will be modified.
 
 ### How to use niffy?
 Couldn't be simpler: Set it as a dependency of your project and add ``{parse_transform, niffy_transform}`` to ``erl_opts`` in your ``rebar.config`` file. Other options for your ``erl_opts`` file include: The compiler flags that apply to all the files, and the directory where you want to output the generated C code:
@@ -124,10 +124,13 @@ Couldn't be simpler: Set it as a dependency of your project and add ``{parse_tra
 ```
 {niffy_cdir, "_generated/c_src"}, % This is the default
 {niffy_flags, ["-Werror",
-               "-I/usr/lib/erlang/erts-5.8.1/include"]}
+               "-I/usr/lib/erlang/erts-5.8.1/include"]},
+%{application, your_app_name_here}
 ```
 
-Just keep in mind that if you want to upgrade niffy, you **have to delete your _build folder** and that it would be a good idea to add ``*.so`` and ``_generated`` to your ``.gitignore``
+Also, you can tell **niffy** the name of your application. This is only useful if you are writing a dependency.
+
+Just keep in mind that if you want to upgrade niffy, you **should delete your _build folder** (otherwise rebar3 doesn't realise it needs to rebuild all the files) and that it would be a good idea to add ``*.so`` and ``_generated`` to your ``.gitignore``.
 
 ### Contact Us
 For **questions** or **general comments** regarding the use of this library, please use our public

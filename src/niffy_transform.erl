@@ -114,10 +114,12 @@ take_function(F, A, [H | T], Acc) ->
 nif_id(Module) ->
   atom_to_list(Module) ++ "_nif".
 
+% Get the app name, this is needed at runtime to retrieve the priv_dir
 app_name(Options, AppDir) ->
   case proplists:get_value(application, Options) of
     undefined ->
       % If the user didn't specify an application name, we have to get it
+      % THIS WILL NOT WORK IF YOU ARE USING NIFFY ON A DEPENDENCY!
       AppSrc = filename:join([AppDir, "src", "*.app.src"]),
       {ok, [{_, AppName, _}]} = file:consult(hd(filelib:wildcard(AppSrc))),
       AppName;
@@ -150,7 +152,7 @@ add_nif_loader(Forms, Func, NIF) ->
 
 add_nif_loader([{function, L, F, A, [Clause]} | T], {F, A}, NIF, Acc) ->
   {clause, L2, Args, [], Body} = Clause,
-  NewClause = {clause, L2, Args, [], [get_nif_loader(L, NIF) | Body]},
+  NewClause = {clause, L2, Args, [], [make_nif_loader(L, NIF) | Body]},
   NewF = {function, L, F, A, [NewClause]},
   lists:reverse([NewF | Acc], T);
 add_nif_loader([H | T], Func, NIF, Acc) ->
@@ -163,7 +165,7 @@ get_function_stub(Line1, Line2, Name, Arity, Args) ->
   Body = {call, Line2, {atom, Line2, throw}, [{atom, Line2, nif_not_loaded}]},
   {function, Line1, Name, Arity, [{clause, Line1, Args, [], [Body]}]}.
 
-get_nif_loader(L, {AppName, NIF}) ->
+make_nif_loader(L, {AppName, NIF}) ->
   % The code this is generating is basically:
   % erlang:load_nif(niffy:nif_filename(AppName, NIF), 0)
   Args = [{call, L,
@@ -192,8 +194,8 @@ build_c_function({F, _, _, Function}) ->
   Args = args(Function),
   Body = body(Function),
   % Get the function that transforms the return value to an erlang term
-  MakeType = get_make_type(return_type(Function, Name)),
-  % And apply it (via regex) to the function body
+  MakeType = build_make_type(return_type(Function, Name)),
+  % And apply it (via regex) to all returns on the function body
   FixedBody = re:replace(Body,
                          "return\s+(?!enif_make)([^;\n]*);",
                          "return " ++ MakeType ++ "(env, \\1);",
@@ -202,7 +204,7 @@ build_c_function({F, _, _, Function}) ->
    "_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])\n",
    "{\n",
    string:join([["  ", T, " ", N, $;] || {T, N} <- Args], "\n"), "\n",
-   make_enif_gets(Args), "\n",
+   build_enif_gets(Args), "\n",
    FixedBody, "}\n"].
 
 func_flags(cpu_bound) ->
@@ -215,7 +217,7 @@ func_flags(_None) ->
 %%==============================================================================
 %% C code utils
 %%==============================================================================
-get_make_type(Type) ->
+build_make_type(Type) ->
   ["enif_make_", proplists:get_value(Type, type_mapping())].
 
 type_mapping() ->
@@ -231,7 +233,7 @@ args(Function) ->
 
 % The body of the function is assumed to be anything within the outmost brackets
 body(Function) ->
-  % Get the position of the outmost bracket
+  % Get the position of the outmost brackets
   OpeningBracket = string:chr(Function,  ${),
   ClosingBracket = string:rchr(Function, $}),
   % Get the spaces we have in front of the first bracket
@@ -249,21 +251,18 @@ body(Function) ->
 return_type(Body, FName) ->
   string:strip(string:substr(Body, 1, string:str(Body, FName) - 1), both).
 
-make_enif_gets(Args) ->
-  make_enif_gets(lists:reverse(Args), 0, []).
+build_enif_gets(Args) ->
+  build_enif_gets(lists:reverse(Args), 0, []).
 
-make_enif_gets([], _, Acc) ->
+build_enif_gets([], _, Acc) ->
   string:join(Acc, "\n");
-make_enif_gets([{Type, Name} | T], I, Acc) ->
-  make_enif_gets(T, I + 1, [make_enif_get(I, Type, Name) | Acc]).
+build_enif_gets([{Type, Name} | T], I, Acc) ->
+  build_enif_gets(T, I + 1, [build_enif_get(I, Type, Name) | Acc]).
 
-make_enif_get(I, Type, Name) ->
-  ["  if (!", get_get_type(Type),
+build_enif_get(I, Type, Name) ->
+  ["  if (!", ["enif_get_", proplists:get_value(Type, type_mapping())],
    "(env, argv[", integer_to_list(I), "], &", Name, "))\n",
    "    return enif_make_badarg(env);"].
-
-get_get_type(Type) ->
-  ["enif_get_", proplists:get_value(Type, type_mapping())].
 
 includes(Functions, Included) ->
   lists:foldr(fun(Function, {NewIncludes, NewFunctions}) ->

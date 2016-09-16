@@ -65,8 +65,7 @@ A more complex example would be this one, where instead of a list of functions w
 -module(another_example).
 
 -niffy(#{functions => [sum_c/2, square/1, {nat_log/1, cpu_bound}],
-         includes  => ["<math.h>"],
-         flags     => ["-pedantic"]}).
+         options   => [{flags, ["-pedantic"]}]}).
 
 -export([sum/2, square/1, nat_log/1]).
 
@@ -123,13 +122,15 @@ ERL_NIF_INIT(another_example, niffuncs, NULL, NULL, NULL, NULL)
 Just remember that niffy is not parsing your code. And it's just making some reasonable assumptions regarding how it is written. You can see that in the way it handled the C comments, any ``return .*;`` that's not followed by ``enif_make_*`` will be modified.
 
 ### How to use niffy?
-Couldn't be simpler: Set it as a dependency of your project and add ``{parse_transform, niffy_transform}`` to ``erl_opts`` in your ``rebar.config`` file. Other options for your ``erl_opts`` file include: The compiler flags that apply to all the files, and the directory where you want to output the generated C code:
+Couldn't be simpler: Set it as a dependency of your project and add ``{parse_transform, niffy_transform}`` to ``erl_opts`` in your ``rebar.config`` file. Any other options go into ``niffy_options`` on ``erl_opts``: The compiler flags that apply to all the files, and the directory where you want to output the generated C code:
 
 ```erlang
-{niffy_cdir, "_generated/c_src"}, % This is the default
-{niffy_flags, ["-Werror",
-               "-I/usr/lib/erlang/erts-5.8.1/include"]},
-%{application, your_app_name_here}
+%{application, your_app_name_here},
+{niffy_options, [{compiler, "gcc"}, % Default
+                 {flags, ["-Werror",
+                          "-I/usr/lib/erlang/erts-5.8.1/include"]},
+                 {c_dir, "_generated/c_src"}, % Default
+                 {strict_types, false}]}
 ```
 
 Also, you can tell **niffy** the name of your application. This is only useful if you are writing a dependency.

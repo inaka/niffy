@@ -9,21 +9,24 @@ parse_transform(Forms, Options) ->
     undefined ->
       Forms;
     Config ->
-      % Get the configuration
+      % Get the functions to niffify
       Functions = maps:get(functions, Config, []),
-      Includes = maps:get(includes, Config, []),
-      CDir = proplists:get_value(niffy_cdir, Options, "_generated/c_src"),
+      % Get the configuration
+      NiffyOptions = options(maps:get(options, Config, []),
+                             proplists:get_value(niffy_options, Options, [])),
+
       Module = module(Forms),
       NIFId = nif_id(Module),
       {ok, AppDir} = file:get_cwd(),
       AppName = app_name(Options, AppDir),
+      CDir = proplists:get_value(c_dir, NiffyOptions),
 
       % Parse the Forms and get the C code
       {CFunctions, Forms2} = functions_from_forms(Functions, Forms),
 
       % Build the C file
       CFileName = filename:join([AppDir, CDir, NIFId ++ ".c"]),
-      CCode = build_c_code(Module, Includes, CFunctions),
+      CCode = build_c_code(Module, CFunctions, NiffyOptions),
       ok = filelib:ensure_dir(CFileName),
       ok = file:write_file(CFileName, CCode),
 
@@ -33,9 +36,9 @@ parse_transform(Forms, Options) ->
       % Compile the C file to the priv folder
       SOName = filename:join([AppDir, "priv", NIFId ++ ".so"]),
       ok = filelib:ensure_dir(SOName),
-      Flags = maps:get(flags, Config, []) ++
-              proplists:get_value(niffy_flags, Options, []),
-      Command = ["gcc -o ", SOName, " ", flags(Flags), " ", CFileName],
+      Flags = flags(NiffyOptions),
+      Compiler = proplists:get_value(compiler, NiffyOptions),
+      Command = [Compiler, " -o ", SOName, " ", Flags, " ", CFileName],
       _ = case os:cmd(Command) of
             [] ->
               ignore;
@@ -70,6 +73,30 @@ normalize_functions([{{F, A}, DirtyMode} | T], Acc) ->
   normalize_functions(T, [{F, A, DirtyMode} | Acc]);
 normalize_functions([{F, A} | T], Acc) ->
   normalize_functions(T, [{F, A, none} | Acc]).
+
+options(ModuleOpts, GlobalOpts) ->
+  [get_option(Type, Name, ModuleOpts, GlobalOpts, Default) ||
+   {Name, Type, Default} <- options_spec()].
+
+options_spec() ->
+  [{flags, merge, ["-flat_namespace", "-undefined suppress", "-fpic",
+                   "-shared"]},
+   {compiler, module_first, "gcc"},
+   {includes, module_only, []},
+   {strict_types, module_first, true},
+   {c_dir, global_only, "_generated/c_src"}].
+
+get_option(merge, K, ModuleOpts, GlobalOpts, Def) ->
+  {K, proplists:get_value(K, ModuleOpts, []) ++
+      proplists:get_value(K, GlobalOpts, []) ++
+      Def};
+get_option(module_only, K, ModuleOpts, _GlobalOpts, Def) ->
+  {K, proplists:get_value(K, ModuleOpts, Def)};
+get_option(global_only, K, _ModuleOpts, GlobalOpts, Def) ->
+  {K, proplists:get_value(K, GlobalOpts, Def)};
+get_option(module_first, K, ModuleOpts, GlobalOpts, Def) ->
+  {K,
+   proplists:get_value(K, ModuleOpts, proplists:get_value(K, GlobalOpts, Def))}.
 
 % Retrieve the module name
 module([{attribute, _, module, Module} | _]) ->
@@ -118,8 +145,7 @@ nif_id(Module) ->
 app_name(Options, AppDir) ->
   case proplists:get_value(application, Options) of
     undefined ->
-      % If the user didn't specify an application name, we have to get it
-      % THIS WILL NOT WORK IF YOU ARE USING NIFFY ON A DEPENDENCY!
+      % If the user didn't specify an application name, we have to get one
       AppSrc = filename:join([AppDir, "src", "*.app.src"]),
       {ok, [{_, AppName, _}]} = file:consult(hd(filelib:wildcard(AppSrc))),
       AppName;
@@ -128,9 +154,8 @@ app_name(Options, AppDir) ->
   end.
 
 % The list of compiler flags used when calling gcc
-flags(UserFlags) ->
-  DefaultFlags = ["-flat_namespace", "-undefined suppress", "-fpic", "-shared"],
-  string:join(lists:usort(DefaultFlags ++ UserFlags), " ").
+flags(NiffyOptions) ->
+  string:join(lists:usort(proplists:get_value(flags, NiffyOptions)), " ").
 
 % Make sure we have an init function
 ensure_init_function(Module, Forms) ->
@@ -176,20 +201,21 @@ make_nif_loader(L, {AppName, NIF}) ->
              {call, L, {remote, L, {atom, L, erlang},
                                    {atom, L, load_nif}}, Args}}.
 
-build_c_code(Mod, Included, Functions) ->
-  {Includes, NewFunctions} = includes(Functions, ["erl_nif.h" | Included]),
+build_c_code(Mod, Functions, Options) ->
+  Includes = proplists:get_value(includes, Options),
+  {NewIncludes, NewFunctions} = includes(Functions, ["erl_nif.h" | Includes]),
   NIFIds = [["{\"", atom_to_list(F), "\", ",
              integer_to_list(A), ", ",
              atom_to_list(F), "_nif, ",
              func_flags(DirtyMode),
              "}"] || {F, A, DirtyMode, _} <- NewFunctions],
-  [string:join(Includes, "\n"), "\n\n",
-   string:join([build_c_function(F) || F <- NewFunctions], "\n"), "\n",
+  [string:join(NewIncludes, "\n"), "\n\n",
+   string:join([build_c_function(F, Options) || F <- NewFunctions], "\n"), "\n",
    "static ErlNifFunc niffuncs[] = {",
    string:join(NIFIds, [",\n", lists:duplicate(32, 32)]), "};\n\n",
    "ERL_NIF_INIT(", atom_to_list(Mod), ", niffuncs, NULL, NULL, NULL, NULL)\n"].
 
-build_c_function({F, _, _, Function}) ->
+build_c_function({F, _, _, Function}, _Options) ->
   Name = atom_to_list(F),
   Args = args(Function),
   Body = body(Function),
@@ -277,5 +303,5 @@ includes({F, A, DirtyMode, Body}) ->
                                      end, string:tokens(Body, "\n")),
   {Includes, {F, A, DirtyMode, string:join(Rest, "\n")}}.
 
-format_include([$< | _] = Include) -> "#include " ++ Include;
-format_include(Include)            -> "#include \"" ++ Include ++ "\"".
+format_include([$< | _] = File) -> "#include " ++ File;
+format_include(File)            -> "#include \"" ++ File ++ "\"".

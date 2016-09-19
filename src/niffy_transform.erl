@@ -14,17 +14,15 @@ parse_transform(Forms, Options) ->
       % Get the configuration
       NiffyOptions = options(maps:get(options, Config, []),
                              proplists:get_value(niffy_options, Options, [])),
-
       Module = module(Forms),
       NIFId = nif_id(Module),
       {ok, AppDir} = file:get_cwd(),
-      AppName = app_name(Options, AppDir),
-      CDir = proplists:get_value(c_dir, NiffyOptions),
 
       % Parse the Forms and get the C code
       {CFunctions, Forms2} = functions_from_forms(Functions, Forms),
 
       % Build the C file
+      CDir = proplists:get_value(c_dir, NiffyOptions),
       CFileName = filename:join([AppDir, CDir, NIFId ++ ".c"]),
       CCode = build_c_code(Module, CFunctions, NiffyOptions),
       ok = filelib:ensure_dir(CFileName),
@@ -38,15 +36,17 @@ parse_transform(Forms, Options) ->
       ok = filelib:ensure_dir(SOName),
       Flags = flags(NiffyOptions),
       Compiler = proplists:get_value(compiler, NiffyOptions),
-      Command = [Compiler, " -o ", SOName, " ", Flags, " ", CFileName],
+      ExtraFiles = proplists:get_value(extra_files, NiffyOptions),
+      FilesToCompile = string:join([CFileName | ExtraFiles], " "),
+      Command = [Compiler, " -o ", SOName, " ", Flags, " ", FilesToCompile],
       _ = case os:cmd(Command) of
             [] ->
               ignore;
             Error ->
-              io:format("Compiler Error:~n$~s~n> ~s", [Command, Error])
+              io:format("Compiler Error:~n$ ~s~n> ~s", [Command, Error])
           end,
       % Add the call to load the nif
-      add_nif_loader(Forms3, InitFunc, {AppName, NIFId})
+      add_nif_loader(Forms3, InitFunc, {app_name(Options, AppDir), NIFId})
   end.
 
 %%==============================================================================
@@ -79,12 +79,15 @@ options(ModuleOpts, GlobalOpts) ->
    {Name, Type, Default} <- options_spec()].
 
 options_spec() ->
-  [{flags, merge, ["-flat_namespace", "-undefined suppress", "-fpic",
-                   "-shared"]},
+  [{flags, merge, ["-fpic", "-shared"]},
    {compiler, module_first, "gcc"},
    {includes, module_only, []},
    {strict_types, module_first, true},
-   {c_dir, global_only, "_generated/c_src"}].
+   {c_dir, global_only, "_generated/c_src"},
+   {on_load, module_only, "NULL"},
+   {on_upgrade, module_only, "NULL"},
+   {on_unload, module_only, "NULL"},
+   {extra_files, merge, []}].
 
 get_option(merge, K, ModuleOpts, GlobalOpts, Def) ->
   {K, proplists:get_value(K, ModuleOpts, []) ++
@@ -108,24 +111,24 @@ module([_ | T]) ->
 functions_from_forms(Functions, Forms) ->
   functions_from_forms(Functions, Forms, [], []).
 
-functions_from_forms([], _, Functions, Forms) ->
-  {Functions, lists:reverse(Forms)};
-functions_from_forms(_, [], Functions, Forms) ->
-  {Functions, lists:reverse(Forms)};
+functions_from_forms([], Forms, Functions, Acc) ->
+  {Functions, lists:reverse(Acc, Forms)};
+functions_from_forms(_, [], Functions, Acc) ->
+  {Functions, lists:reverse(Acc)};
 functions_from_forms(FunctionNames,
                     [{function, L1, F, A,
                       [{clause, _, Args, [], [{string, L2, CCode}]}]} = H | T],
-                    Functions, Forms) ->
+                    Functions, Acc) ->
   case take_function(F, A, FunctionNames) of
     false ->
-      functions_from_forms(FunctionNames, T, Functions, [H | Forms]);
+      functions_from_forms(FunctionNames, T, Functions, [H | Acc]);
     {{F, A, DirtyMode}, NewFunctionNames} ->
       Stub = get_function_stub(L1, L2, F, A, Args),
       NewFunctions = [{F, A, DirtyMode, CCode} | Functions],
-      functions_from_forms(NewFunctionNames, T, NewFunctions, [Stub | Forms])
+      functions_from_forms(NewFunctionNames, T, NewFunctions, [Stub | Acc])
   end;
-functions_from_forms(FunctionNames, [H | T], Functions, Forms) ->
-  functions_from_forms(FunctionNames, T, Functions, [H | Forms]).
+functions_from_forms(FunctionNames, [H | T], Functions, Acc) ->
+  functions_from_forms(FunctionNames, T, Functions, [H | Acc]).
 
 % Get the function specification from the function list
 take_function(F, A, Functions) ->
@@ -161,9 +164,11 @@ flags(NiffyOptions) ->
 ensure_init_function(Module, Forms) ->
   ensure_init_function(Module, Forms, []).
 
-ensure_init_function(Module, [], Acc) ->
-  FName = list_to_atom(atom_to_list(Module) ++ "nif_init"),
-  L = lists:reverse([{function, 0, FName, 0, [{clause, 0, [], [], []}]} | Acc]),
+% Yes, this is assuming the last statement on the forms is an EOF
+ensure_init_function(Module, [], [Eof | Acc]) ->
+  FName = list_to_atom(atom_to_list(Module) ++ "_nif_init"),
+  L = lists:reverse([Eof, {function, 0, FName, 0, [{clause, 0, [], [], []}]} |
+                     Acc]),
   {P, S} = lists:split(3, L),
   {{FName, 0}, P ++ [{attribute, 0, on_load, {FName, 0}}] ++ S};
 ensure_init_function(_Module, [{attribute, _, on_load, F} | _] = L, Acc) ->
@@ -213,24 +218,25 @@ build_c_code(Mod, Functions, Options) ->
    string:join([build_c_function(F, Options) || F <- NewFunctions], "\n"), "\n",
    "static ErlNifFunc niffuncs[] = {",
    string:join(NIFIds, [",\n", lists:duplicate(32, 32)]), "};\n\n",
-   "ERL_NIF_INIT(", atom_to_list(Mod), ", niffuncs, NULL, NULL, NULL, NULL)\n"].
+   "ERL_NIF_INIT(", atom_to_list(Mod), ", niffuncs, ",
+   proplists:get_value(on_load, Options),
+   ", NULL, ",
+   proplists:get_value(on_upgrade, Options), ", ",
+   proplists:get_value(on_unload, Options), ")\n"].
 
-build_c_function({F, _, _, Function}, _Options) ->
+build_c_function({F, _, _, Function}, Options) ->
   Name = atom_to_list(F),
-  Args = args(Function),
   Body = body(Function),
   % Get the function that transforms the return value to an erlang term
-  MakeType = build_make_type(return_type(Function, Name)),
+  ReturnReplacement = build_make_type(return_type(Function, Name)),
   % And apply it (via regex) to all returns on the function body
   FixedBody = re:replace(Body,
                          "return\s+(?!enif_make)([^;\n]*);",
-                         "return " ++ MakeType ++ "(env, \\1);",
+                         ReturnReplacement,
                          [global]),
   ["static ERL_NIF_TERM ", atom_to_list(F),
-   "_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])\n",
-   "{\n",
-   string:join([["  ", T, " ", N, $;] || {T, N} <- Args], "\n"), "\n",
-   build_enif_gets(Args), "\n",
+   "_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])\n", "{\n",
+   build_argument_getters(Function, Options),
    FixedBody, "}\n"].
 
 func_flags(cpu_bound) ->
@@ -243,19 +249,21 @@ func_flags(_None) ->
 %%==============================================================================
 %% C code utils
 %%==============================================================================
+build_make_type("ERL_NIF_TERM") ->
+  "return \\1";
 build_make_type(Type) ->
-  ["enif_make_", proplists:get_value(Type, type_mapping())].
+  "return enif_make_" ++
+  proplists:get_value(Type, type_mapping()) ++
+  "(env, \\1);".
 
 type_mapping() ->
   [{"int", "int"},
    {"ErlNifSInt64", "int64"},
    {"double", "double"},
-   {"long int", "long"}].
-
-args(Function) ->
-  ArgsStr = string:sub_string(Function, string:chr(Function, $() + 1,
-                                        string:chr(Function, $)) - 1),
-  [list_to_tuple(string:tokens(A, " ")) || A <- string:tokens(ArgsStr, ",")].
+   {"long int", "long"},
+   {"unsigned int", "uint"},
+   {"ErlNifUInt64", "uint64"},
+   {"unsigned long", "ulong"}].
 
 % The body of the function is assumed to be anything within the outmost brackets
 body(Function) ->
@@ -277,18 +285,37 @@ body(Function) ->
 return_type(Body, FName) ->
   string:strip(string:substr(Body, 1, string:str(Body, FName) - 1), both).
 
-build_enif_gets(Args) ->
-  build_enif_gets(lists:reverse(Args), 0, []).
+build_argument_getters(Function, Options) ->
+  case args(Function) of
+    [] ->
+      "";
+    [{"ErlNifEnv*", "env"},
+     {"int", "argc"},
+     {"const ERL_NIF_TERM", "argv[]"}] ->
+      "";
+    Args ->
+      [string:join([["  ", T, " ", N, $;] || {T, N} <- Args], "\n"), "\n",
+       build_argument_getters(lists:reverse(Args), Options, 0, []), "\n"]
+  end.
 
-build_enif_gets([], _, Acc) ->
-  string:join(Acc, "\n");
-build_enif_gets([{Type, Name} | T], I, Acc) ->
-  build_enif_gets(T, I + 1, [build_enif_get(I, Type, Name) | Acc]).
+build_argument_getters([], _Options, _, Acc) ->
+  string:join(Acc, ["\n"]);
+build_argument_getters([{Type, Name} | T], Options, I, Acc) ->
+  NewEnifGet = build_enif_get(I, Type, Name, Options),
+  build_argument_getters(T, Options, I + 1, [NewEnifGet | Acc]).
 
-build_enif_get(I, Type, Name) ->
+build_enif_get(I, Type, Name, _Options) ->
   ["  if (!", ["enif_get_", proplists:get_value(Type, type_mapping())],
    "(env, argv[", integer_to_list(I), "], &", Name, "))\n",
    "    return enif_make_badarg(env);"].
+
+args(Function) ->
+  ArgsStr = string:sub_string(Function, string:chr(Function, $() + 1,
+                                        string:chr(Function, $)) - 1),
+  [case string:tokens(A, " ") of
+     [T, N] -> {T, N};
+     [T1, T2, N] -> {T1 ++ " " ++ T2, N}
+   end || A <- string:tokens(ArgsStr, ",")].
 
 includes(Functions, Included) ->
   lists:foldr(fun(Function, {NewIncludes, NewFunctions}) ->

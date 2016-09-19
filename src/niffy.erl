@@ -11,7 +11,7 @@ nif_filename(AppName, NIF) ->
               true ->
                 filename:join("..", "priv");
               _ ->
-                filename:join("priv")
+                "priv"
             end;
           PrivDir ->
             PrivDir

@@ -1,0 +1,11 @@
+{application,
+ niffy,
+ [{description, "NIF code generation tool"},
+  {vsn, "0.1.0"},
+  {id, "niffy"},
+  {registered, []},
+  {modules, []},
+  {applications, []},
+  {env, []},
+  {maintainers, ["Inaka", "HernanRivasAcosta"]},
+  {licenses, ["Apache2"]}]}.

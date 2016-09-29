@@ -24,7 +24,7 @@ parse_transform(Forms, Options) ->
       % Build the C file
       CDir = proplists:get_value(c_dir, NiffyOptions),
       CFileName = filename:join([AppDir, CDir, NIFId ++ ".c"]),
-      CCode = build_c_code(Module, CFunctions, NiffyOptions),
+      CCode = build_c_code(Module, lists:reverse(CFunctions), NiffyOptions),
       ok = filelib:ensure_dir(CFileName),
       ok = file:write_file(CFileName, CCode),
 
@@ -78,6 +78,15 @@ options(ModuleOpts, GlobalOpts) ->
   [get_option(Type, Name, ModuleOpts, GlobalOpts, Default) ||
    {Name, Type, Default} <- options_spec()].
 
+% This is easy to read, the options are simply tuples where the first element is
+% the name, the second is the mode, and the third is the default value.
+% Available modes are:
+% - merge: Appends the module configuration to the erl_opts AND the default
+% - module_first: It will use the module value if available, if not, it will use
+%                 the one in erl_opts (and the default as a last resort)
+% - global_only: Used when it makes no sense to have the option on a module
+% - module_only: And this is the counterpart, sometimes it doesn't make sense to
+%                have a global setting
 options_spec() ->
   [{flags, merge, ["-fpic", "-shared"]},
    {compiler, module_first, "gcc"},
@@ -87,7 +96,10 @@ options_spec() ->
    {on_load, module_only, "NULL"},
    {on_upgrade, module_only, "NULL"},
    {on_unload, module_only, "NULL"},
-   {extra_files, merge, []}].
+   {extra_files, merge, []},
+   {default_string_type, module_first, string},
+   {max_string_size, module_first, 1023},
+   {string_encoding, module_first, "ERL_NIF_LATIN1"}].
 
 get_option(merge, K, ModuleOpts, GlobalOpts, Def) ->
   {K, proplists:get_value(K, ModuleOpts, []) ++
@@ -196,7 +208,7 @@ get_function_stub(Line1, Line2, Name, Arity, Args) ->
   {function, Line1, Name, Arity, [{clause, Line1, Args, [], [Body]}]}.
 
 make_nif_loader(L, {AppName, NIF}) ->
-  % The code this is generating is basically:
+  % The code this is generating is just:
   % erlang:load_nif(niffy:nif_filename(AppName, NIF), 0)
   Args = [{call, L,
            {remote, L, {atom, L, niffy}, {atom, L, nif_filename}},
@@ -250,13 +262,17 @@ func_flags(_None) ->
 %% C code utils
 %%==============================================================================
 build_make_type("ERL_NIF_TERM") ->
-  "return \\1";
+  "return \\1;";
+build_make_type("bool") ->
+  "return enif_make_atom(env, \\1 ? \"true\" : \"false\");";
+build_make_type("_Bool") ->
+  build_make_type("bool");
 build_make_type(Type) ->
   "return enif_make_" ++
-  proplists:get_value(Type, type_mapping()) ++
+  proplists:get_value(Type, numeric_type_mapping()) ++
   "(env, \\1);".
 
-type_mapping() ->
+numeric_type_mapping() ->
   [{"int", "int"},
    {"ErlNifSInt64", "int64"},
    {"double", "double"},
@@ -287,25 +303,85 @@ return_type(Body, FName) ->
 
 build_argument_getters(Function, Options) ->
   case args(Function) of
+    % Do nothing for functions with no parameters
     [] ->
       "";
+    % Special case to handle when the user doesn't want any parameter magic
     [{"ErlNifEnv*", "env"},
      {"int", "argc"},
      {"const ERL_NIF_TERM", "argv[]"}] ->
       "";
+    % Try to convert the standard C types to the getter functions from erl_nif.h
     Args ->
-      [string:join([["  ", T, " ", N, $;] || {T, N} <- Args], "\n"), "\n",
-       build_argument_getters(lists:reverse(Args), Options, 0, []), "\n"]
+      ["  // Actual variable declarations from the parameters\n",
+       string:join([["  ", handle_const_char(T), " ", N, $;] ||
+                    {T, N} <- Args], "\n"),
+       "\n  // Assigning the contents of 'env' to the variables",
+       case lists:any(fun({"const char*", _}) ->
+                          true;
+                         (_) ->
+                          false
+                      end, Args) of
+         true ->
+           "\n  unsigned int internal_str_length;";
+         false ->
+           ""
+       end, "\n", build_argument_getters(Args, Options, 0, []),
+       "\n  // Your actual (mostly untached) code\n"]
   end.
 
+handle_const_char("const char*") ->
+  "char*";
+handle_const_char(Other) ->
+  Other.
+
 build_argument_getters([], _Options, _, Acc) ->
-  string:join(Acc, ["\n"]);
+  string:join(lists:reverse(Acc), ["\n"]);
+build_argument_getters([{"const char*", Name} | T], Options, I, Acc) ->
+  IStr = integer_to_list(I),
+  Get = case get_type_from_name(Name, Options) of
+          string ->
+            ["  if (!enif_get_list_length(env, argv[", IStr, "], "
+             "&internal_str_length))\n",
+             "    return enif_make_badarg(env);\n",
+             "  ", Name, " = malloc(internal_str_length + 1);\n"
+             "  if (!", Name, ")\n    return enif_raise_exception(env, ",
+             "enif_make_atom(env, \"malloc_error\"));\n",
+             "  if (!enif_get_string(env, argv[", IStr, "], ",
+             Name, ", ",
+             integer_to_list(proplists:get_value(max_string_size, Options)),
+             ", ", proplists:get_value(string_encoding, Options), "))\n",
+             "    return enif_make_badarg(env);"]
+        end,
+  build_argument_getters(T, Options, I + 1, [Get | Acc]);
 build_argument_getters([{Type, Name} | T], Options, I, Acc) ->
-  NewEnifGet = build_enif_get(I, Type, Name, Options),
+  NewEnifGet = build_numeric_enif_get(I, Type, Name, Options),
   build_argument_getters(T, Options, I + 1, [NewEnifGet | Acc]).
 
-build_enif_get(I, Type, Name, _Options) ->
-  ["  if (!", ["enif_get_", proplists:get_value(Type, type_mapping())],
+get_type_from_name(Name, Options) ->
+  LName = string:to_lower(Name),
+  case lists:suffix("string", LName) orelse
+       lists:suffix("str", LName) of
+    true ->
+      string;
+    false ->
+      case lists:suffix("atom", LName) of
+        true ->
+          atom;
+        false ->
+          case lists:suffix("binary", LName) orelse
+               lists:suffix("bin", LName) of
+            true ->
+              string;
+            false ->
+              string
+              %proplists:get_value(default_string_type, Options)
+          end
+      end
+  end.
+
+build_numeric_enif_get(I, Type, Name, _Options) ->
+  ["  if (!", ["enif_get_", proplists:get_value(Type, numeric_type_mapping())],
    "(env, argv[", integer_to_list(I), "], &", Name, "))\n",
    "    return enif_make_badarg(env);"].
 
